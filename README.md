@@ -1,8 +1,6 @@
-# Solana Level 1 Token Starter
+# Solana Level 1 — Token starter + Escrow
 
-Учебный starter Superteam KZ (уровень 1). Ветка `task/02-burn` добавляет инструкцию `burn_tokens` поверх покрытия из `task/01-tests`.
-
-Программа использует Token-2022 для нового токена, `anchor_spl::token_interface` для совместимости с обеими token-программами, `transfer_checked` для переводов и `burn_checked` для сжигания. Тесты написаны на Rust + LiteSVM, без legacy `@solana/web3.js`.
+Учебный workspace Superteam KZ. Ветка `task/03-escrow` добавляет программу `programs/escrow`: минимальное DeFi-приложение, которое блокирует Token-2022 токены отправителя до `release` или `cancel`.
 
 ## Зафиксированный стек
 
@@ -13,75 +11,82 @@
 | Rust | `1.89.0` (`rust-toolchain.toml`) |
 | LiteSVM | `0.10.0` |
 | Токены | Token-2022 + `anchor_spl::token_interface` |
-| Переводы | только `transfer_checked` |
-| Сжигание | только `burn_checked` с `decimals` из mint |
-| Новый TypeScript-клиент | `@solana/kit` (клиентский код не добавлялся) |
+| Переводы / burn / escrow CPI | только `transfer_checked` / `burn_checked` |
+| Новый TypeScript | `@solana/kit` (не добавлялся) |
 
-## Архитектура программы
+## Архитектура escrow
 
-- `create_token` — создаёт mint с выбранной token-программой, decimals и mint/freeze authority.
-- `create_token_account` — создаёт associated token account для владельца и mint.
-- `mint_tokens` — выпускает токены (`mint_to`), сумма должна быть > 0.
-- `transfer_tokens` — переводит через `transfer_checked`.
-- `burn_tokens` — сжигает токены через `burn_checked`.
+Каждая сделка — отдельный PDA и отдельный vault.
 
-Критичные инварианты проверяются в программе (accounts constraints + `TokenStarterError`), а не только в тестах. Критичные аккаунты типизированы (`Signer`, `InterfaceAccount`, `Interface`), без `UncheckedAccount`.
+- **EscrowState** (`seeds = [b"escrow", sender, deal_id.to_le_bytes()]`) хранит `sender`, `receiver`, `mint`, `amount`, `deal_id`, `bump`, `status`.
+- **Vault** — ATA этого PDA: authority = escrow PDA, mint и token program зафиксированы constraints. Общего vault нет.
+- Критичные аккаунты типизированы (`Signer`, `Account`, `InterfaceAccount`, `SystemAccount`). `UncheckedAccount` не используется.
 
-## Account constraints `burn_tokens`
+### State machine
 
-| Аккаунт | Проверки |
+```
+initialize(amount > 0, receiver != sender)
+        │
+        ▼
+     Created ──cancel──► Cancelled (vault пустой, оба аккаунта закрываются)
+        │
+     deposit (точная сумма через transfer_checked)
+        │
+        ▼
+      Funded ──release──► Released (токены в ATA receiver, vault+state закрываются)
+        │
+     cancel
+        │
+        ▼
+     Cancelled (токены возвращаются sender, vault+state закрываются)
+```
+
+Каждый переход выполняется один раз. `Released` и `Cancelled` терминальны: аккаунты закрываются, rent уходит `sender`. Повторный `release`/`cancel` невозможен.
+
+### Инструкции
+
+| Инструкция | Кто | Что проверяет программа |
+| --- | --- | --- |
+| `initialize(deal_id, amount)` | sender | `amount > 0`, `receiver != sender`, уникальный PDA, vault привязан к mint/token program |
+| `deposit(deal_id)` | sender | status `Created`, `has_one = sender/mint`, seeds/bump, sender ATA, vault authority = PDA, баланс ≥ amount, CPI `transfer_checked` ровно `amount` |
+| `release(deal_id)` | только sender | status `Funded`, receiver совпадает со state, mint/token accounts, PDA-подписанный `transfer_checked` в ATA receiver, close vault + state |
+| `cancel(deal_id)` | только sender | status `Created` или `Funded`, возврат токенов если были, close vault + state |
+
+### Threat model
+
+| Угроза | Защита |
 | --- | --- |
-| `authority` | `Signer` — владелец token account должен подписать транзакцию |
-| `mint` | `mut`, `InterfaceAccount<Mint>`, `mint::token_program = token_program` |
-| `token_account` | `mut`, `InterfaceAccount<TokenAccount>`, `token::mint = mint`, `token::authority = authority`, `token::token_program = token_program` |
-| `token_program` | `Interface<TokenInterface>` — Token-2022 или классический Token Program |
+| Украсть токены из чужой сделки | vault authority = PDA сделки; CPI только с seeds этой сделки |
+| Общий vault / смешение сделок | уникальный PDA `[escrow, sender, deal_id]`, vault — ATA этого PDA |
+| Повторный release/cancel | одноразовый статус + закрытие аккаунтов |
+| Подмена mint | `has_one = mint`, `token::mint`, `mint::token_program` |
+| Подмена receiver | `receiver.key() == escrow.receiver` и ATA authority = receiver |
+| Неверный signer | `Signer` + `has_one = sender`; receiver не может deposit/release/cancel |
+| Нулевая сумма | `AmountMustBePositive` в initialize |
+| Недостаточный баланс | `InsufficientBalance` до CPI |
+| Повторный deal_id | `init` того же PDA отклоняется |
+| Unchecked transfer | запрещён; только `transfer_checked` |
 
-В handler дополнительно:
-
-- `amount > 0` → `TokenStarterError::AmountMustBePositive`
-- `token_account.amount >= amount` → `TokenStarterError::InsufficientBalance`
-- CPI `token_interface::burn_checked(..., amount, mint.decimals)`
-
-Неверный authority, чужой mint или другая token program отклоняются constraints до CPI. После любой ошибки баланс token account и `supply` mint не меняются.
+После любой отклонённой транзакции балансы, supply и escrow-аккаунты не меняются.
 
 ## Сборка и тесты
 
-Чистый checkout этой ветки должен проходить:
-
 ```bash
-anchor build
+anchor build --ignore-keys
 cargo test --workspace --locked
 ```
 
-Если `anchor build` предупредит о несовпадении program ID (локальный keypair генерируется в `target/deploy/` и не коммитится), повторите сборку так:
-
-```bash
-anchor build --ignore-keys
-```
-
-Тесты читают `target/deploy/solana_level_1_token_starter.so`, поэтому перед первым `cargo test` нужна сборка.
+`anchor build` тоже проходит; `--ignore-keys` нужен, потому что program keypair не хранится в Git.
 
 ### Ожидаемый результат
 
-- `anchor build` пишет `.so` в `target/deploy/`.
-- `cargo test --workspace --locked` проходит тесты первого задания и новые burn-тесты:
-  - `burns_tokens_and_decreases_supply`
-  - `rejects_zero_burn_amount`
-  - `rejects_wrong_burn_authority`
-  - `rejects_token_account_from_another_mint`
-  - `rejects_insufficient_balance`
-
-## Что покрывают тесты `burn_tokens`
-
-- успешное сжигание уменьшает баланс token account и общий `supply` на одну и ту же сумму;
-- нулевая сумма → `AmountMustBePositive`, состояние не меняется;
-- неверный authority (не владелец token account) отклоняется, состояние не меняется;
-- token account от другого mint отклоняется, состояние не меняется;
-- сумма больше баланса → `InsufficientBalance`, состояние не меняется.
+- собираются `solana_level_1_token_starter` и `escrow`;
+- проходят тесты токен-программы (task 01–02) и escrow:
+  - `release_end_to_end_moves_tokens_and_closes_accounts`
+  - `cancel_end_to_end_returns_tokens_and_closes_accounts`
+  - негативы: нулевая сумма, повторный deal_id, неверный signer, подмена receiver/mint, недостаточный баланс, повторные release/cancel.
 
 ## Правила сдачи
 
-- публичная ссылка на GitHub и ветка `task/02-burn` (или commit SHA);
-- не публикуйте keypair, seed phrase, приватные ключи или `.env` с секретами;
-- не используйте `@solana/web3.js` в новом клиентском коде;
-- для переводов используйте `transfer_checked`, для burn — `burn_checked`.
+- публичная ссылка и ветка `task/03-escrow` (или commit SHA);
+- не публикуйте keypair, seed phrase, приватные ключи или `.env`.
