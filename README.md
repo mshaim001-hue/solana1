@@ -34,11 +34,17 @@
 Чистый checkout этой ветки должен проходить:
 
 ```bash
-anchor build --ignore-keys
+anchor build
 cargo test --workspace --locked
 ```
 
-Флаг `--ignore-keys` нужен потому, что program keypair намеренно не хранится в репозитории. Для собственного devnet-деплоя создайте keypair локально и выполните `anchor keys sync`, но не коммитьте файл ключа.
+Если `anchor build` предупредит о несовпадении program ID (локальный keypair генерируется в `target/deploy/` и не коммитится), повторите сборку так:
+
+```bash
+anchor build --ignore-keys
+```
+
+Для собственного devnet-деплоя создайте keypair локально и выполните `anchor keys sync`, но не коммитьте файл ключа.
 
 Тесты читают `target/deploy/solana_level_1_token_starter.so`, поэтому `anchor build --ignore-keys` обязателен перед первым `cargo test`.
 
@@ -65,7 +71,7 @@ cargo test --workspace --locked
 - нулевая сумма (`mint_tokens`, `transfer_tokens`) → `AmountMustBePositive`
 - неверный authority (не mint authority / не владелец source)
 - другой mint (destination ATA от другого mint)
-- одинаковые source и destination → `SourceEqualsDestination`
+- одинаковые source и destination — транзакция отклоняется (Anchor `ConstraintDuplicateMutableAccount` срабатывает раньше кастомной `SourceEqualsDestination`)
 
 Общие хелперы лежат в `programs/solana-level-1-token-starter/tests/common/mod.rs`.
 
