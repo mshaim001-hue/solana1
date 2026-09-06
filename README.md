@@ -1,8 +1,8 @@
 # Solana Level 1 Token Starter
 
-Учебный starter Superteam KZ (уровень 1). Ветка `task/01-tests` усиливает LiteSVM-покрытие токен-программы: mint, ATA, mint/transfer и обязательные негативные сценарии.
+Учебный starter Superteam KZ (уровень 1). Ветка `task/02-burn` добавляет инструкцию `burn_tokens` поверх покрытия из `task/01-tests`.
 
-Программа использует Token-2022 для нового токена, `anchor_spl::token_interface` для совместимости с обеими token-программами и `transfer_checked` для переводов. Тесты написаны на Rust + LiteSVM, без legacy `@solana/web3.js`.
+Программа использует Token-2022 для нового токена, `anchor_spl::token_interface` для совместимости с обеими token-программами, `transfer_checked` для переводов и `burn_checked` для сжигания. Тесты написаны на Rust + LiteSVM, без legacy `@solana/web3.js`.
 
 ## Зафиксированный стек
 
@@ -14,20 +14,35 @@
 | LiteSVM | `0.10.0` |
 | Токены | Token-2022 + `anchor_spl::token_interface` |
 | Переводы | только `transfer_checked` |
-| Новый TypeScript-клиент | `@solana/kit` (в этом задании клиентский код не добавлялся) |
-
-`@solana/web3.js` не используется. TypeScript-клиент Anchor всё ещё тянет legacy SDK, поэтому тесты этого задания остаются на Rust и LiteSVM.
+| Сжигание | только `burn_checked` с `decimals` из mint |
+| Новый TypeScript-клиент | `@solana/kit` (клиентский код не добавлялся) |
 
 ## Архитектура программы
 
-Инструкции в `programs/solana-level-1-token-starter`:
-
 - `create_token` — создаёт mint с выбранной token-программой, decimals и mint/freeze authority.
 - `create_token_account` — создаёт associated token account для владельца и mint.
-- `mint_tokens` — выпускает токены (`mint_to`), сумма должна быть > 0, authority должен совпадать с mint authority.
-- `transfer_tokens` — переводит через `transfer_checked`; source и destination должны быть разными, mint и token program проверяются constraints.
+- `mint_tokens` — выпускает токены (`mint_to`), сумма должна быть > 0.
+- `transfer_tokens` — переводит через `transfer_checked`.
+- `burn_tokens` — сжигает токены через `burn_checked`.
 
-Критичные инварианты проверяются в программе (accounts constraints + `TokenStarterError`), а не только в тестах.
+Критичные инварианты проверяются в программе (accounts constraints + `TokenStarterError`), а не только в тестах. Критичные аккаунты типизированы (`Signer`, `InterfaceAccount`, `Interface`), без `UncheckedAccount`.
+
+## Account constraints `burn_tokens`
+
+| Аккаунт | Проверки |
+| --- | --- |
+| `authority` | `Signer` — владелец token account должен подписать транзакцию |
+| `mint` | `mut`, `InterfaceAccount<Mint>`, `mint::token_program = token_program` |
+| `token_account` | `mut`, `InterfaceAccount<TokenAccount>`, `token::mint = mint`, `token::authority = authority`, `token::token_program = token_program` |
+| `token_program` | `Interface<TokenInterface>` — Token-2022 или классический Token Program |
+
+В handler дополнительно:
+
+- `amount > 0` → `TokenStarterError::AmountMustBePositive`
+- `token_account.amount >= amount` → `TokenStarterError::InsufficientBalance`
+- CPI `token_interface::burn_checked(..., amount, mint.decimals)`
+
+Неверный authority, чужой mint или другая token program отклоняются constraints до CPI. После любой ошибки баланс token account и `supply` mint не меняются.
 
 ## Сборка и тесты
 
@@ -44,42 +59,29 @@ cargo test --workspace --locked
 anchor build --ignore-keys
 ```
 
-Для собственного devnet-деплоя создайте keypair локально и выполните `anchor keys sync`, но не коммитьте файл ключа.
-
-Тесты читают `target/deploy/solana_level_1_token_starter.so`, поэтому `anchor build --ignore-keys` обязателен перед первым `cargo test`.
+Тесты читают `target/deploy/solana_level_1_token_starter.so`, поэтому перед первым `cargo test` нужна сборка.
 
 ### Ожидаемый результат
 
-- `anchor build --ignore-keys` завершается успешно и пишет `.so` в `target/deploy/`.
-- `cargo test --workspace --locked` проходит все тесты:
-  - `creates_token_2022_mint`, `create_token_sets_requested_decimals`
-  - `creates_associated_token_account`
-  - `mints_tokens_and_increases_supply` и негативные mint-сценарии
-  - `transfers_tokens_without_changing_supply` и негативные transfer-сценарии
+- `anchor build` пишет `.so` в `target/deploy/`.
+- `cargo test --workspace --locked` проходит тесты первого задания и новые burn-тесты:
+  - `burns_tokens_and_decreases_supply`
+  - `rejects_zero_burn_amount`
+  - `rejects_wrong_burn_authority`
+  - `rejects_token_account_from_another_mint`
+  - `rejects_insufficient_balance`
 
-## Что покрывают тесты
+## Что покрывают тесты `burn_tokens`
 
-Положительные сценарии:
-
-- `create_token` — владелец mint (Token-2022), `decimals`, mint authority и нулевой `supply`.
-- `create_token_account` — ATA принадлежит Token-2022, поля `owner` и `mint` совпадают с аргументами, баланс 0.
-- `mint_tokens` — баланс получателя и общий `supply` увеличиваются на одну и ту же сумму.
-- `transfer_tokens` — баланс source уменьшается, destination увеличивается, `supply` не меняется.
-
-Негативные сценарии:
-
-- нулевая сумма (`mint_tokens`, `transfer_tokens`) → `AmountMustBePositive`
-- неверный authority (не mint authority / не владелец source)
-- другой mint (destination ATA от другого mint)
-- одинаковые source и destination — транзакция отклоняется (Anchor `ConstraintDuplicateMutableAccount` срабатывает раньше кастомной `SourceEqualsDestination`)
-
-Общие хелперы лежат в `programs/solana-level-1-token-starter/tests/common/mod.rs`.
+- успешное сжигание уменьшает баланс token account и общий `supply` на одну и ту же сумму;
+- нулевая сумма → `AmountMustBePositive`, состояние не меняется;
+- неверный authority (не владелец token account) отклоняется, состояние не меняется;
+- token account от другого mint отклоняется, состояние не меняется;
+- сумма больше баланса → `InsufficientBalance`, состояние не меняется.
 
 ## Правила сдачи
 
-- публичная ссылка на GitHub и ветка `task/01-tests` (или commit SHA);
+- публичная ссылка на GitHub и ветка `task/02-burn` (или commit SHA);
 - не публикуйте keypair, seed phrase, приватные ключи или `.env` с секретами;
 - не используйте `@solana/web3.js` в новом клиентском коде;
-- для переводов используйте `transfer_checked`.
-
-Следующие задания выполняются в ветках `task/02-burn` и `task/03-escrow`.
+- для переводов используйте `transfer_checked`, для burn — `burn_checked`.

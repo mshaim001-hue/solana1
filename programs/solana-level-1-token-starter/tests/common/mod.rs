@@ -222,6 +222,42 @@ pub fn transfer_tokens_ix(
     }
 }
 
+pub fn burn_tokens_ix(
+    authority: &Keypair,
+    mint: anchor_lang::prelude::Pubkey,
+    token_account: anchor_lang::prelude::Pubkey,
+    amount: u64,
+) -> Instruction {
+    let accounts = solana_level_1_token_starter::accounts::BurnTokens {
+        authority: authority.pubkey(),
+        mint,
+        token_account,
+        token_program: token_program(),
+    };
+    Instruction {
+        program_id: solana_level_1_token_starter::ID,
+        accounts: account_metas(accounts),
+        data: solana_level_1_token_starter::instruction::BurnTokens { amount }.data(),
+    }
+}
+
+pub fn burn_tokens(
+    svm: &mut LiteSVM,
+    payer: &Keypair,
+    authority: &Keypair,
+    mint: anchor_lang::prelude::Pubkey,
+    token_account: anchor_lang::prelude::Pubkey,
+    amount: u64,
+) {
+    send_instruction(
+        svm,
+        payer,
+        &[payer, authority],
+        burn_tokens_ix(authority, mint, token_account, amount),
+    )
+    .expect("burn_tokens must succeed");
+}
+
 pub fn transfer_tokens(
     svm: &mut LiteSVM,
     payer: &Keypair,
