@@ -36,9 +36,9 @@ pub struct Cancel<'info> {
     pub sender_token_account: InterfaceAccount<'info, TokenAccount>,
     #[account(
         mut,
-        token::mint = mint,
-        token::authority = escrow,
-        token::token_program = token_program,
+        associated_token::mint = mint,
+        associated_token::authority = escrow,
+        associated_token::token_program = token_program,
     )]
     pub vault: InterfaceAccount<'info, TokenAccount>,
     pub token_program: Interface<'info, TokenInterface>,
@@ -57,8 +57,8 @@ pub fn handler(ctx: Context<Cancel>, deal_id: u64) -> Result<()> {
     ];
     let signer = &[seeds];
 
-    if ctx.accounts.escrow.status == EscrowStatus::Funded {
-        let amount = ctx.accounts.escrow.amount;
+    let amount = ctx.accounts.vault.amount;
+    if amount > 0 {
         let transfer_accounts = TransferChecked {
             mint: ctx.accounts.mint.to_account_info(),
             from: ctx.accounts.vault.to_account_info(),

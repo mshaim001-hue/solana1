@@ -28,7 +28,7 @@
 initialize(amount > 0, receiver != sender)
         │
         ▼
-     Created ──cancel──► Cancelled (vault пустой, оба аккаунта закрываются)
+     Created ──cancel──► Cancelled (весь баланс vault возвращается sender, оба аккаунта закрываются)
         │
      deposit (точная сумма через transfer_checked)
         │
@@ -40,6 +40,8 @@ initialize(amount > 0, receiver != sender)
         ▼
      Cancelled (токены возвращаются sender, vault+state закрываются)
 ```
+
+При `release` весь текущий баланс vault, включая посторонние переводы (dust), получает receiver. При `cancel` весь баланс возвращается sender даже в статусе `Created`. В `deposit`, `release` и `cancel` проверяется, что vault — именно ATA escrow PDA для заданных mint и token program.
 
 Каждый переход выполняется один раз. `Released` и `Cancelled` терминальны: аккаунты закрываются, rent уходит `sender`. Повторный `release`/`cancel` невозможен.
 
@@ -84,6 +86,8 @@ cargo test --workspace --locked
 - проходят тесты токен-программы (task 01–02) и escrow:
   - `release_end_to_end_moves_tokens_and_closes_accounts`
   - `cancel_end_to_end_returns_tokens_and_closes_accounts`
+  - dust: посторонний перевод 1 raw unit перед release и cancel (Created/Funded), перевод всего баланса и закрытие обоих аккаунтов;
+  - подмена vault на не-ATA с теми же mint и authority отклоняется в deposit/release/cancel;
   - негативы: нулевая сумма, повторный deal_id, неверный signer, подмена receiver/mint, недостаточный баланс, повторные release/cancel.
 
 ## Правила сдачи

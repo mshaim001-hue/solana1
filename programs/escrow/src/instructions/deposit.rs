@@ -32,9 +32,9 @@ pub struct Deposit<'info> {
     pub sender_token_account: InterfaceAccount<'info, TokenAccount>,
     #[account(
         mut,
-        token::mint = mint,
-        token::authority = escrow,
-        token::token_program = token_program,
+        associated_token::mint = mint,
+        associated_token::authority = escrow,
+        associated_token::token_program = token_program,
     )]
     pub vault: InterfaceAccount<'info, TokenAccount>,
     pub token_program: Interface<'info, TokenInterface>,

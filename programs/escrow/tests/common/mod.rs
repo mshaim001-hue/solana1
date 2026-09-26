@@ -35,8 +35,11 @@ fn read_so(name: &str) -> Vec<u8> {
 
 pub fn setup() -> (LiteSVM, Keypair) {
     let mut svm = LiteSVM::new();
-    svm.add_program(solana_level_1_token_starter::ID, &read_so("solana_level_1_token_starter.so"))
-        .expect("token starter must load");
+    svm.add_program(
+        solana_level_1_token_starter::ID,
+        &read_so("solana_level_1_token_starter.so"),
+    )
+    .expect("token starter must load");
     svm.add_program(escrow::ID, &read_so("escrow.so"))
         .expect("escrow must load");
 
@@ -372,7 +375,9 @@ pub fn unpack_mint_supply(data: &[u8]) -> u64 {
 }
 
 pub fn token_amount(svm: &LiteSVM, token_account: &anchor_lang::prelude::Pubkey) -> u64 {
-    let account = svm.get_account(token_account).expect("token account must exist");
+    let account = svm
+        .get_account(token_account)
+        .expect("token account must exist");
     unpack_token_amount(&account.data)
 }
 
@@ -401,6 +406,19 @@ pub struct FundedDeal {
 }
 
 pub fn funded_deal(amount: u64) -> FundedDeal {
+    let mut deal = created_deal(amount);
+    deposit(
+        &mut deal.svm,
+        &deal.payer,
+        &deal.sender,
+        deal.mint.pubkey(),
+        deal.sender_ata,
+        DEAL_ID,
+    );
+    deal
+}
+
+pub fn created_deal(amount: u64) -> FundedDeal {
     let (mut svm, payer) = setup();
     let mint_authority = Keypair::new();
     let sender = Keypair::new();
@@ -430,7 +448,6 @@ pub fn funded_deal(amount: u64) -> FundedDeal {
         DEAL_ID,
         amount,
     );
-    deposit(&mut svm, &payer, &sender, mint.pubkey(), sender_ata, DEAL_ID);
 
     let escrow = escrow_pda(sender.pubkey(), DEAL_ID).0;
     let vault = vault_address_for_mint(sender.pubkey(), DEAL_ID, mint.pubkey());
@@ -446,4 +463,42 @@ pub fn funded_deal(amount: u64) -> FundedDeal {
         escrow,
         vault,
     }
+}
+
+/// Transfer one raw unit from an unrelated signer without either party signing.
+pub fn send_dust(deal: &mut FundedDeal) {
+    let outsider = Keypair::new();
+    let source = create_token_account(
+        &mut deal.svm,
+        &deal.payer,
+        outsider.pubkey(),
+        deal.mint.pubkey(),
+    );
+    mint_tokens(
+        &mut deal.svm,
+        &deal.payer,
+        &deal.mint_authority,
+        deal.mint.pubkey(),
+        source,
+        1,
+    );
+    let accounts = solana_level_1_token_starter::accounts::TransferTokens {
+        authority: outsider.pubkey(),
+        mint: deal.mint.pubkey(),
+        source,
+        destination: deal.vault,
+        token_program: token_program(),
+    };
+    send_instruction(
+        &mut deal.svm,
+        &deal.payer,
+        &[&deal.payer, &outsider],
+        Instruction {
+            program_id: solana_level_1_token_starter::ID,
+            accounts: account_metas(accounts),
+            data: solana_level_1_token_starter::instruction::TransferTokens { amount: 1 }.data(),
+        },
+    )
+    .expect("unsolicited dust transfer must succeed");
+    assert_eq!(token_amount(&deal.svm, &source), 0);
 }

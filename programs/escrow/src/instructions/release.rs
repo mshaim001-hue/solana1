@@ -32,9 +32,9 @@ pub struct Release<'info> {
     pub mint: InterfaceAccount<'info, Mint>,
     #[account(
         mut,
-        token::mint = mint,
-        token::authority = escrow,
-        token::token_program = token_program,
+        associated_token::mint = mint,
+        associated_token::authority = escrow,
+        associated_token::token_program = token_program,
     )]
     pub vault: InterfaceAccount<'info, TokenAccount>,
     #[account(
@@ -48,7 +48,7 @@ pub struct Release<'info> {
 }
 
 pub fn handler(ctx: Context<Release>, deal_id: u64) -> Result<()> {
-    let amount = ctx.accounts.escrow.amount;
+    let amount = ctx.accounts.vault.amount;
     let decimals = ctx.accounts.mint.decimals;
     let bump = ctx.accounts.escrow.bump;
     let sender_key = ctx.accounts.escrow.sender;
@@ -68,11 +68,7 @@ pub fn handler(ctx: Context<Release>, deal_id: u64) -> Result<()> {
         authority: ctx.accounts.escrow.to_account_info(),
     };
     token_interface::transfer_checked(
-        CpiContext::new_with_signer(
-            ctx.accounts.token_program.key(),
-            transfer_accounts,
-            signer,
-        ),
+        CpiContext::new_with_signer(ctx.accounts.token_program.key(), transfer_accounts, signer),
         amount,
         decimals,
     )?;

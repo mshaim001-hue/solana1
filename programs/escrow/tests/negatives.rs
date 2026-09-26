@@ -1,9 +1,9 @@
 mod common;
 
 use common::{
-    account_exists, assert_tx_err, cancel_ix, create_token, create_token_account,
-    deposit_ix, funded_deal, initialize, initialize_ix, logs_contain, mint_supply, mint_tokens,
-    release, release_ix, send_instruction, setup, token_amount, vault_address_for_mint, DEAL_AMOUNT,
+    account_exists, assert_tx_err, cancel_ix, create_token, create_token_account, deposit_ix,
+    funded_deal, initialize, initialize_ix, logs_contain, mint_supply, mint_tokens, release,
+    release_ix, send_instruction, setup, token_amount, vault_address_for_mint, DEAL_AMOUNT,
     DEAL_ID, DECIMALS,
 };
 use solana_keypair::Keypair;
@@ -129,8 +129,12 @@ fn rejects_receiver_substitution() {
     deal.svm
         .airdrop(&impostor.pubkey(), common::AIRDROP_LAMPORTS)
         .unwrap();
-    let impostor_ata =
-        create_token_account(&mut deal.svm, &deal.payer, impostor.pubkey(), deal.mint.pubkey());
+    let impostor_ata = create_token_account(
+        &mut deal.svm,
+        &deal.payer,
+        impostor.pubkey(),
+        deal.mint.pubkey(),
+    );
     let before = snapshot_balances(
         &deal.svm,
         &deal.mint.pubkey(),
@@ -153,8 +157,7 @@ fn rejects_receiver_substitution() {
     );
     let error = result.expect_err("release to a substituted receiver must fail");
     assert!(
-        logs_contain(&error, "ReceiverMismatch")
-            || logs_contain(&error, "Receiver does not match"),
+        logs_contain(&error, "ReceiverMismatch") || logs_contain(&error, "Receiver does not match"),
         "expected ReceiverMismatch, logs: {:?}",
         error.meta.logs
     );
@@ -174,8 +177,12 @@ fn rejects_receiver_substitution() {
 fn rejects_mint_substitution() {
     let mut deal = funded_deal(DEAL_AMOUNT);
     let other_mint = create_token(&mut deal.svm, &deal.payer, &deal.mint_authority, DECIMALS);
-    let other_sender_ata =
-        create_token_account(&mut deal.svm, &deal.payer, deal.sender.pubkey(), other_mint.pubkey());
+    let other_sender_ata = create_token_account(
+        &mut deal.svm,
+        &deal.payer,
+        deal.sender.pubkey(),
+        other_mint.pubkey(),
+    );
     mint_tokens(
         &mut deal.svm,
         &deal.payer,
@@ -329,4 +336,66 @@ fn rejects_repeated_cancel() {
     assert_eq!(token_amount(&deal.svm, &deal.sender_ata), DEAL_AMOUNT);
     assert_eq!(token_amount(&deal.svm, &deal.receiver_ata), 0);
     assert!(!account_exists(&deal.svm, &deal.escrow));
+}
+
+#[test]
+fn rejects_non_associated_vault_for_deposit_release_and_cancel() {
+    for operation in ["deposit", "release", "cancel"] {
+        let mut deal = if operation == "deposit" {
+            common::created_deal(DEAL_AMOUNT)
+        } else {
+            funded_deal(DEAL_AMOUNT)
+        };
+        // A valid token account with the same mint and escrow authority, but not its ATA.
+        let substitute = Keypair::new().pubkey();
+        let vault_account = deal.svm.get_account(&deal.vault).unwrap();
+        deal.svm
+            .set_account(substitute, vault_account.clone())
+            .unwrap();
+        let mut ix = match operation {
+            "deposit" => deposit_ix(&deal.sender, deal.mint.pubkey(), deal.sender_ata, DEAL_ID),
+            "release" => release_ix(
+                &deal.sender,
+                deal.receiver.pubkey(),
+                deal.mint.pubkey(),
+                deal.receiver_ata,
+                DEAL_ID,
+            ),
+            _ => cancel_ix(&deal.sender, deal.mint.pubkey(), deal.sender_ata, DEAL_ID),
+        };
+        ix.accounts
+            .iter_mut()
+            .find(|meta| meta.pubkey == deal.vault)
+            .unwrap()
+            .pubkey = substitute;
+        let before = snapshot_balances(
+            &deal.svm,
+            &deal.mint.pubkey(),
+            &deal.sender_ata,
+            &deal.receiver_ata,
+            &deal.vault,
+        );
+        let error = send_instruction(&mut deal.svm, &deal.payer, &[&deal.payer, &deal.sender], ix)
+            .expect_err("non-ATA vault must be rejected");
+        assert!(
+            logs_contain(&error, "ConstraintAssociated"),
+            "{operation}: {:?}",
+            error.meta.logs
+        );
+        assert_eq!(
+            snapshot_balances(
+                &deal.svm,
+                &deal.mint.pubkey(),
+                &deal.sender_ata,
+                &deal.receiver_ata,
+                &deal.vault
+            ),
+            before
+        );
+        assert_eq!(
+            deal.svm.get_account(&substitute).unwrap().data,
+            vault_account.data
+        );
+        assert!(account_exists(&deal.svm, &deal.escrow));
+    }
 }
