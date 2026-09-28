@@ -95,20 +95,35 @@ fn rejects_wrong_signer() {
         &deal.vault,
     );
 
-    assert_tx_err(
-        send_instruction(
-            &mut deal.svm,
-            &deal.payer,
-            &[&deal.payer, &deal.receiver],
-            release_ix(
-                &deal.receiver,
-                deal.receiver.pubkey(),
-                deal.mint.pubkey(),
-                deal.receiver_ata,
-                DEAL_ID,
-            ),
-        ),
-        "receiver must not be able to release",
+    // Derive escrow/vault from the real sender, then swap only the signer.
+    // Passing the receiver into release_ix() would check a different PDA and
+    // fail with AccountNotInitialized instead of ConstraintSeeds/Unauthorized.
+    let mut ix = release_ix(
+        &deal.sender,
+        deal.receiver.pubkey(),
+        deal.mint.pubkey(),
+        deal.receiver_ata,
+        DEAL_ID,
+    );
+    ix.accounts
+        .iter_mut()
+        .find(|meta| meta.pubkey == deal.sender.pubkey())
+        .unwrap()
+        .pubkey = deal.receiver.pubkey();
+
+    let error = send_instruction(
+        &mut deal.svm,
+        &deal.payer,
+        &[&deal.payer, &deal.receiver],
+        ix,
+    )
+    .expect_err("receiver must not be able to release");
+    assert!(
+        logs_contain(&error, "ConstraintSeeds")
+            || logs_contain(&error, "Unauthorized")
+            || logs_contain(&error, "Signer is not authorized"),
+        "expected ConstraintSeeds/Unauthorized, logs: {:?}",
+        error.meta.logs
     );
 
     let after = snapshot_balances(
